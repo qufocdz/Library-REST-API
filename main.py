@@ -1,10 +1,32 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy.orm import selectinload
 
-from database import SessionLocal
+from database import SessionLocal, create_db_and_tables
+from database import (
+    AuthorCreate,
+    Author,
+    AuthorDetailOut,
+    Book,
+    BookCreate,
+    BookDetailOut,
+    Category,
+    CategoryCreate,
+    CategoryDetailOut,
+    PublisherCreate,
+    Publisher,
+    PublisherDetailOut,
+)
 
 app = FastAPI()
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    create_db_and_tables()
+
+
+
 
 def get_db():
     db = SessionLocal()
@@ -14,152 +36,110 @@ def get_db():
         db.close()
 
 @app.post("/books")
-def create_book(book: dict, db: Session = Depends(get_db)):
+def create_book(book: BookCreate, db: Session = Depends(get_db)):
 
-    # 1. Dodaj książkę
-    result = db.execute(text("""
-        INSERT INTO book (title, publication_year, pages, isbn, rental_rate, publisher_id)
-        VALUES (:title, :publication_year, :pages, :isbn, :rental_rate, :publisher_id)
-    """), book)
+    book_data = book.model_dump(exclude={"author_ids", "category_ids"})
+    new_book = Book(**book_data)
 
+    if book.author_ids:
+        authors = db.query(Author).filter(Author.author_id.in_(book.author_ids)).all()
+        new_book.author = authors
+
+    if book.category_ids:
+        categories = db.query(Category).filter(Category.category_id.in_(book.category_ids)).all()
+        new_book.category = categories
+
+    db.add(new_book)
     db.commit()
-    book_id = result.lastrowid
-
-    # 2. Dodaj autorów
-    for author_id in book.get("author_ids", []):
-        db.execute(text("""
-            INSERT INTO book_author (book_id, author_id)
-            VALUES (:book_id, :author_id)
-        """), {
-            "book_id": book_id,
-            "author_id": author_id
-        })
-
-    # 3. Dodaj kategorie
-    for category_id in book.get("category_ids", []):
-        db.execute(text("""
-            INSERT INTO book_category (book_id, category_id)
-            VALUES (:book_id, :category_id)
-        """), {
-            "book_id": book_id,
-            "category_id": category_id
-        })
-
-    db.commit()
+    db.refresh(new_book)
 
     return {
         "message": "Book created",
-        "book_id": book_id
+        "book_id": new_book.book_id
     }
 
-@app.get("/books")
+@app.get("/books", response_model=list[BookDetailOut])
 def get_books(db: Session = Depends(get_db)):
-    result = db.execute(text("SELECT * FROM book"))
-    books = result.fetchall()
-
-    return [dict(row._mapping) for row in books]
-
-@app.get("/books")
-def get_books(db: Session = Depends(get_db)):
-    # Pobierz książki wraz z publisherem
-    books_result = db.execute(text("""
-        SELECT b.book_id, b.title, b.publication_year, b.pages, b.isbn, b.rental_rate,
-               p.publisher_id, p.name AS publisher_name
-        FROM book b
-        JOIN publisher p ON b.publisher_id = p.publisher_id
-    """))
-    books = []
-    for row in books_result:
-        book_id = row.book_id
-
-        # Pobierz autorów dla książki
-        authors_result = db.execute(text("""
-            SELECT a.author_id, a.first_name, a.last_name
-            FROM author a
-            JOIN book_author ba ON a.author_id = ba.author_id
-            WHERE ba.book_id = :book_id
-        """), {"book_id": book_id})
-        authors = [dict(a._mapping) for a in authors_result]
-
-        # Pobierz kategorie dla książki
-        categories_result = db.execute(text("""
-            SELECT c.category_id, c.name
-            FROM category c
-            JOIN book_category bc ON c.category_id = bc.category_id
-            WHERE bc.book_id = :book_id
-        """), {"book_id": book_id})
-        categories = [dict(c._mapping) for c in categories_result]
-
-        books.append({
-            "book_id": book_id,
-            "title": row.title,
-            "publication_year": row.publication_year,
-            "pages": row.pages,
-            "isbn": row.isbn,
-            "rental_rate": float(row.rental_rate),
-            "publisher": {
-                "publisher_id": row.publisher_id,
-                "name": row.publisher_name
-            },
-            "authors": authors,
-            "categories": categories
-        })
-
-    return books
+    books_result = (
+        db.query(Book)
+        .options(
+            selectinload(Book.publisher),
+            selectinload(Book.author),
+            selectinload(Book.category),
+        )
+        .all()
+    )
+    return books_result
 
 @app.post("/authors")
-def create_author(author: dict, db: Session = Depends(get_db)):
-    result = db.execute(text("""
-        INSERT INTO author (first_name, last_name)
-        VALUES (:first_name, :last_name)
-    """), author)
-
+def create_author(author: AuthorCreate, db: Session = Depends(get_db)):
+    new_author = Author(**author.model_dump())
+    db.add(new_author)
     db.commit()
+    db.refresh(new_author)
 
     return {
         "message": "Author created",
-        "author_id": result.lastrowid
+        "author_id": new_author.author_id
     }
 
-@app.get("/authors")
+@app.get("/authors", response_model=list[AuthorDetailOut])
 def get_authors(db: Session = Depends(get_db)):
-    result = db.execute(text("SELECT * FROM author"))
-    return [dict(r._mapping) for r in result]
+    authors = db.query(Author).options(selectinload(Author.book)).all()
+    return [
+        {
+            "author_id": author.author_id,
+            "first_name": author.first_name,
+            "last_name": author.last_name,
+            "book_title": [book.title for book in author.book],
+        }
+        for author in authors
+    ]
 
 @app.post("/publishers")
-def create_publisher(publisher: dict, db: Session = Depends(get_db)):
-    result = db.execute(text("""
-        INSERT INTO publisher (name)
-        VALUES (:name)
-    """), publisher)
-
+def create_publisher(publisher: PublisherCreate, db: Session = Depends(get_db)):
+    new_publisher = Publisher(**publisher.model_dump())
+    db.add(new_publisher)
     db.commit()
+    db.refresh(new_publisher)
 
     return {
         "message": "Publisher created",
-        "publisher_id": result.lastrowid
+        "publisher_id": new_publisher.publisher_id
     }
 
-@app.get("/publishers")
+@app.get("/publishers", response_model=list[PublisherDetailOut])
 def get_publishers(db: Session = Depends(get_db)):
-    result = db.execute(text("SELECT * FROM publisher"))
-    return [dict(r._mapping) for r in result]
+    publishers = db.query(Publisher).options(selectinload(Publisher.book)).all()
+    return [
+        {
+            "publisher_id": publisher.publisher_id,
+            "name": publisher.name,
+            "book_title": [book.title for book in publisher.book],
+        }
+        for publisher in publishers
+    ]
 
 @app.post("/categories")
-def create_category(category: dict, db: Session = Depends(get_db)):
-    result = db.execute(text("""
-        INSERT INTO category (name)
-        VALUES (:name)
-    """), category)
-
+def create_category(category: CategoryCreate, db: Session = Depends(get_db)):
+    new_category = Category(**category.model_dump())
+    db.add(new_category)
     db.commit()
+    db.refresh(new_category)
 
     return {
         "message": "Category created",
-        "category_id": result.lastrowid
+        "category_id": new_category.category_id
     }
 
-@app.get("/categories")
+@app.get("/categories", response_model=list[CategoryDetailOut])
 def get_categories(db: Session = Depends(get_db)):
-    result = db.execute(text("SELECT * FROM category"))
-    return [dict(r._mapping) for r in result]
+    categories = db.query(Category).options(selectinload(Category.book)).all()
+    return [
+        {
+            "category_id": category.category_id,
+            "name": category.name,
+            "book_title": [book.title for book in category.book],
+        }
+        for category in categories
+    ]
