@@ -59,7 +59,12 @@ def create_book(book: BookCreate, db: Session = Depends(get_db)):
     }
 
 @app.get("/books", response_model=list[BookDetailOut])
-def get_books(db: Session = Depends(get_db)):
+def get_books(db: Session = Depends(get_db), 
+              title: str = None, 
+              author_first_name: str = None, 
+              author_last_name: str = None, 
+              publisher_name: str = None, 
+              category_name: str = None):
     books_result = (
         db.query(Book)
         .options(
@@ -69,7 +74,18 @@ def get_books(db: Session = Depends(get_db)):
         )
         .all()
     )
+    if title:
+        books_result = books_result.filter(Book.title.ilike(f"%{title}%"))
+    if author_first_name:
+        books_result = books_result.filter(Author.first_name.ilike(f"%{author_first_name}%"))
+    if author_last_name:
+        books_result = books_result.filter(Author.last_name.ilike(f"%{author_last_name}%"))
+    if publisher_name:
+        books_result = books_result.filter(Publisher.name.ilike(f"%{publisher_name}%"))
+    if category_name:
+        books_result = books_result.filter(Category.name.ilike(f"%{category_name}%"))
     return books_result
+
 
 @app.post("/authors")
 def create_author(author: AuthorCreate, db: Session = Depends(get_db)):
@@ -84,17 +100,18 @@ def create_author(author: AuthorCreate, db: Session = Depends(get_db)):
     }
 
 @app.get("/authors", response_model=list[AuthorDetailOut])
-def get_authors(db: Session = Depends(get_db)):
-    authors = db.query(Author).options(selectinload(Author.book)).all()
-    return [
-        {
-            "author_id": author.author_id,
-            "first_name": author.first_name,
-            "last_name": author.last_name,
-            "book_title": [book.title for book in author.book],
-        }
-        for author in authors
-    ]
+def get_authors(db: Session = Depends(get_db), 
+                first_name: str = None, 
+                last_name: str = None):
+    authors_result = db.query(Author).options(selectinload(Author.book)).all()
+    if first_name:
+        authors_result = authors_result.filter(Author.first_name.ilike(f"%{first_name}%"))
+    if last_name:
+        authors_result = authors_result.filter(Author.last_name.ilike(f"%{last_name}%"))
+
+    return authors_result
+        
+    
 
 @app.post("/publishers")
 def create_publisher(publisher: PublisherCreate, db: Session = Depends(get_db)):
