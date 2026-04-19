@@ -1,5 +1,6 @@
 import csv
 import os
+import re
 from dotenv import load_dotenv
 import random
 import ast
@@ -80,6 +81,49 @@ def get_or_create_publisher(name):
     cursor.execute("INSERT INTO publisher (name) VALUES (%s)", (name,))
     conn.commit()
     return cursor.lastrowid
+
+
+def clean_author_name(name):
+    # usuwa nawiasy typu (Preface), (Editor), itp.
+    name = re.sub(r"\(.*?\)", "", name)
+
+    # usuwa podwójne spacje
+    name = " ".join(name.split())
+
+    return name.strip()
+
+
+def parse_authors(value):
+    if not value:
+        return []
+
+    # jeśli lista Pythonowa
+    try:
+        parsed = ast.literal_eval(value)
+        if isinstance(parsed, list):
+            value = ",".join(parsed)
+        else:
+            value = str(parsed)
+    except:
+        pass
+
+    # split po przecinku (BO TAK MASZ DANE)
+    parts = value.split(",")
+
+    authors = []
+    for p in parts:
+        p = clean_author_name(p)
+
+        # filtr śmieci
+        if len(p) < 2:
+            continue
+        if p.lower() in ["none", "unknown"]:
+            continue
+
+        authors.append(p)
+
+    # deduplikacja
+    return list(dict.fromkeys(authors))
 
 
 def get_or_create_author(full_name):
@@ -191,7 +235,7 @@ with open(CSV_FILE, newline='', encoding='utf-8') as f:
             book_id = res[0]
 
             # AUTHORS
-            for a in parse_list_field(row['author']):
+            for a in parse_authors(row['author']):
                 author_id = get_or_create_author(a)
                 cursor.execute("""
                     INSERT IGNORE INTO book_author (book_id, author_id)

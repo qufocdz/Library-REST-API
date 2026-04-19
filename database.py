@@ -123,7 +123,7 @@ class Book(SQLModel, table=True):
     book_id: int | None = Field(default=None, primary_key=True)
     title: str = Field(max_length=45)
     publication_year: int
-    page: int | None = Field(default=None)
+    pages: int | None = Field(default=None)
     isbn: str = Field(max_length=20, unique=True)
     rental_rate: Decimal = Field(sa_column=Column(Numeric(10, 2), nullable=False))
     publisher_id: int = Field(foreign_key="publisher.publisher_id")
@@ -137,7 +137,7 @@ class Book(SQLModel, table=True):
 class BookCreate(BaseModel):
     title: str
     publication_year: int
-    page: int | None = None
+    pages: int | None = None
     isbn: str
     rental_rate: float
     publisher_id: int
@@ -215,7 +215,7 @@ class BookDetailOut(BaseModel):
     book_id: int
     title: str
     publication_year: int | None
-    page: int | None
+    pages: int | None
     isbn: str | None
     rental_rate: float | None
     publisher: PublisherOut | None
