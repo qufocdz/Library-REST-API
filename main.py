@@ -1,23 +1,11 @@
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
-
-from database import SessionLocal, create_db_and_tables
-from database import (
-    AuthorCreate,
-    Author,
-    AuthorDetailOut,
-    Book,
-    BookCreate,
-    BookDetailOut,
-    Category,
-    CategoryCreate,
-    CategoryDetailOut,
-    PublisherCreate,
-    Publisher,
-    PublisherDetailOut,
-)
-
+from sqlalchemy import or_
+from fastapi import Depends
+from datetime import date, timedelta
+from fastapi import HTTPException
+from database import *
 app = FastAPI()
 
 
@@ -86,6 +74,217 @@ def get_books(db: Session = Depends(get_db),
         books_result = books_result.filter(Category.name.ilike(f"%{category_name}%"))
     return books_result
 
+@app.get("/books/search", response_model=list[BookDetailOut])
+def search_books(
+    db: Session = Depends(get_db),
+    title: str | None = None,
+    category_id: int | None = None,
+    category_name: str | None = None,
+    author_first_name: str | None = None,
+    author_last_name: str | None = None,
+    publisher_name: str | None = None,
+    q: str | None = None,
+    library_id: int | None = None,          # 👈 NOWE
+    available_only: bool = False             # 👈 NOWE
+):
+    query = (
+        db.query(Book)
+        .options(
+            selectinload(Book.publisher),
+            selectinload(Book.author),
+            selectinload(Book.category),
+        )
+        .distinct()
+    )
+
+    # --- JOINY ---
+    if category_id or category_name:
+        query = query.join(Book.category)
+
+    if author_first_name or author_last_name:
+        query = query.join(Book.author)
+
+    if publisher_name:
+        query = query.join(Book.publisher)
+
+    # 👇 NOWE: dostępność w bibliotece
+    if library_id or available_only:
+        query = query.join(Book.copy)
+
+    # --- FILTRY ---
+    if title:
+        query = query.filter(Book.title.ilike(f"%{title}%"))
+
+    if category_id:
+        query = query.filter(Category.category_id == category_id)
+
+    if category_name:
+        query = query.filter(Category.name.ilike(f"%{category_name}%"))
+
+    if author_first_name:
+        query = query.filter(Author.first_name.ilike(f"%{author_first_name}%"))
+
+    if author_last_name:
+        query = query.filter(Author.last_name.ilike(f"%{author_last_name}%"))
+
+    if publisher_name:
+        query = query.filter(Publisher.name.ilike(f"%{publisher_name}%"))
+
+    # --- GLOBAL SEARCH ---
+    if q:
+        query = query.outerjoin(Book.publisher)\
+                     .outerjoin(Book.author)\
+                     .outerjoin(Book.category)
+
+        query = query.filter(
+            or_(
+                Book.title.ilike(f"%{q}%"),
+                Book.isbn.ilike(f"%{q}%"),
+                Publisher.name.ilike(f"%{q}%"),
+                Author.first_name.ilike(f"%{q}%"),
+                Author.last_name.ilike(f"%{q}%"),
+                Category.name.ilike(f"%{q}%"),
+            )
+        )
+
+    # --- 📦 DOSTĘPNOŚĆ W BIBLIOTECE ---
+    if library_id:
+        query = query.filter(Copy.library_id == library_id)
+
+    if library_id or available_only:
+        subquery = db.query(Copy.book_id)
+
+        if library_id:
+            subquery = subquery.filter(Copy.library_id == library_id)
+
+        if available_only:
+            subquery = subquery.filter(Copy.status == "available")
+
+        query = query.filter(Book.book_id.in_(subquery))
+
+    return query.all()
+
+
+
+@app.get("/libraries/{library_id}/books/{isbn}/copies")
+def get_book_copies_in_library(
+    library_id: int,
+    isbn: str,
+    db: Session = Depends(get_db)
+):
+    book = db.query(Book).filter(Book.isbn == isbn).first()
+
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    copy_ids = (
+        db.query(Copy.copy_id)
+        .filter(
+            Copy.book_id == book.book_id,
+            Copy.library_id == library_id
+        )
+        .all()
+    )
+
+    # SQLAlchemy zwraca listę tuple [(1,), (2,), ...]
+    copy_ids = [c[0] for c in copy_ids]
+
+    return {
+        "book_id": book.book_id,
+        "isbn": isbn,
+        "library_id": library_id,
+        "has_any_copy_in_library": len(copy_ids) > 0,
+        "copy_ids": copy_ids
+    }
+
+@app.get("/rentals")
+def get_rentals(db: Session = Depends(get_db)):
+    return db.query(Rental).all()
+
+@app.post("/rentals")
+def rent_book(
+    isbn: str,
+    library_id: int,
+    card_id: int,
+    db: Session = Depends(get_db)
+):
+    # 1. książka
+    book = db.query(Book).filter(Book.isbn == isbn).first()
+    if not book:
+        raise HTTPException(status_code=404, detail="Book not found")
+
+    # 2. karta
+    card = db.query(LibraryCard).filter(LibraryCard.card_id == card_id).first()
+    if not card:
+        raise HTTPException(status_code=404, detail="Library card not found")
+
+    if card.status != LibraryCardStatus.ACTIVE:
+        raise HTTPException(status_code=400, detail="Library card is not active")
+
+    # 3. reader + typ czytelnika
+    reader = db.query(Reader).filter(Reader.reader_id == card.reader_id).first()
+    reader_type = db.query(ReaderType).filter(ReaderType.type_id == reader.type_id).first()
+
+    # 4. aktualnie aktywne wypożyczenia
+    active_rentals_count = (
+        db.query(Rental)
+        .join(LibraryCard)
+        .filter(
+            LibraryCard.reader_id == reader.reader_id,
+            Rental.status == RentalStatus.ACTIVE
+        )
+        .count()
+    )
+
+    # 5. limit książek
+    if active_rentals_count >= reader_type.max_books:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Limit reached: max {reader_type.max_books} books allowed"
+        )
+
+    # 6. dostępna kopia
+    copy = (
+        db.query(Copy)
+        .filter(
+            Copy.book_id == book.book_id,
+            Copy.library_id == library_id,
+            Copy.status == CopyStatus.AVAILABLE
+        )
+        .first()
+    )
+
+    if not copy:
+        raise HTTPException(status_code=400, detail="No available copies")
+
+    # 7. terminy z typu czytelnika
+    today = date.today()
+    due_date = today + timedelta(days=reader_type.borrow_days)
+
+    # 8. wypożyczenie
+    rental = Rental(
+        copy_id=copy.copy_id,
+        card_id=card.card_id,
+        rental_date=today,
+        due_date=due_date,
+        status=RentalStatus.ACTIVE,
+        rental_rate=copy.book.rental_rate
+    )
+
+    # 9. zmiana statusu kopii
+    copy.status = CopyStatus.BORROWED
+
+    db.add(rental)
+    db.commit()
+    db.refresh(rental)
+
+    return {
+        "message": "Book rented successfully",
+        "rental_id": rental.rental_id,
+        "due_date": rental.due_date,
+        "max_books_allowed": reader_type.max_books,
+        "currently_rented": active_rentals_count + 1
+    }
 
 @app.post("/authors")
 def create_author(author: AuthorCreate, db: Session = Depends(get_db)):
@@ -100,16 +299,29 @@ def create_author(author: AuthorCreate, db: Session = Depends(get_db)):
     }
 
 @app.get("/authors", response_model=list[AuthorDetailOut])
-def get_authors(db: Session = Depends(get_db), 
-                first_name: str = None, 
+def get_authors(db: Session = Depends(get_db),
+                first_name: str = None,
                 last_name: str = None):
-    authors_result = db.query(Author).options(selectinload(Author.book)).all()
-    if first_name:
-        authors_result = authors_result.filter(Author.first_name.ilike(f"%{first_name}%"))
-    if last_name:
-        authors_result = authors_result.filter(Author.last_name.ilike(f"%{last_name}%"))
 
-    return authors_result
+    query = db.query(Author).options(selectinload(Author.book))
+
+    if first_name:
+        query = query.filter(Author.first_name.ilike(f"%{first_name}%"))
+
+    if last_name:
+        query = query.filter(Author.last_name.ilike(f"%{last_name}%"))
+
+    authors = query.all()
+
+    return [
+        {
+            "author_id": a.author_id,
+            "first_name": a.first_name,
+            "last_name": a.last_name,
+            "book_title": [b.title for b in a.book],
+        }
+        for a in authors
+    ]
         
     
 
