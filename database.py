@@ -277,8 +277,8 @@ class ReaderType(SQLModel, table=True):
 
     type_id: int | None = Field(default=None, primary_key=True)
     name: str = Field(max_length=45)
-    max_book: int
-    borrow_day: int
+    max_books: int
+    borrow_days: int
     fine_per_day: Decimal = Field(sa_column=Column(Numeric(5, 2), nullable=False))
 
     reader: list["Reader"] = Relationship(back_populates="reader_type")
@@ -330,7 +330,6 @@ class Rental(SQLModel, table=True):
             nullable=True,
         ),
     )
-    rental_rate: int = Field(description="Rental rate copied from the book at rent time.")
     rental_date: date
     due_date: date
     return_date: date | None = Field(default=None)
