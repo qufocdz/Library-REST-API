@@ -2,10 +2,35 @@ from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
 from sqlalchemy import or_
-from fastapi import Depends
+
 from datetime import date, timedelta
 from fastapi import HTTPException
-from database import *
+from database import (
+    create_db_and_tables,
+    SessionLocal,
+    Book,
+    BookCreate,
+    BookDetailOut,
+    Author,
+    AuthorCreate,
+    AuthorDetailOut,
+    Publisher,
+    PublisherCreate,
+    PublisherDetailOut,
+    Category,
+    CategoryCreate,
+    CategoryDetailOut,
+    Copy,
+    CopyStatus,
+    Rental,
+    RentalStatus,
+    LibraryCard,
+    LibraryCardStatus,
+    Reader,
+    ReaderType,
+)
+
+
 app = FastAPI()
 
 
@@ -52,27 +77,34 @@ def get_books(db: Session = Depends(get_db),
               author_first_name: str = None, 
               author_last_name: str = None, 
               publisher_name: str = None, 
-              category_name: str = None):
-    books_result = (
+              category_name: str = None,
+              limit: int = 100
+              ):
+    
+    query = (
         db.query(Book)
         .options(
             selectinload(Book.publisher),
             selectinload(Book.author),
             selectinload(Book.category),
         )
-        .all()
     )
+
     if title:
-        books_result = books_result.filter(Book.title.ilike(f"%{title}%"))
+        query = query.filter(Book.title.ilike(f"%{title}%"))
     if author_first_name:
-        books_result = books_result.filter(Author.first_name.ilike(f"%{author_first_name}%"))
+        query = query.filter(Author.first_name.ilike(f"%{author_first_name}%"))
     if author_last_name:
-        books_result = books_result.filter(Author.last_name.ilike(f"%{author_last_name}%"))
+        query = query.filter(Author.last_name.ilike(f"%{author_last_name}%"))
     if publisher_name:
-        books_result = books_result.filter(Publisher.name.ilike(f"%{publisher_name}%"))
+        query = query.filter(Publisher.name.ilike(f"%{publisher_name}%"))
     if category_name:
-        books_result = books_result.filter(Category.name.ilike(f"%{category_name}%"))
-    return books_result
+        query = query.filter(Category.name.ilike(f"%{category_name}%"))
+
+    query = query.limit(limit)
+    return query.all()
+
+
 
 @app.get("/books/search", response_model=list[BookDetailOut])
 def search_books(
@@ -84,8 +116,8 @@ def search_books(
     author_last_name: str | None = None,
     publisher_name: str | None = None,
     q: str | None = None,
-    library_id: int | None = None,          # 👈 NOWE
-    available_only: bool = False             # 👈 NOWE
+    library_id: int | None = None,          
+    available_only: bool = False             
 ):
     query = (
         db.query(Book)
@@ -93,23 +125,11 @@ def search_books(
             selectinload(Book.publisher),
             selectinload(Book.author),
             selectinload(Book.category),
+            selectinload(Book.copy)
         )
-        .distinct()
     )
 
-    # --- JOINY ---
-    if category_id or category_name:
-        query = query.join(Book.category)
-
-    if author_first_name or author_last_name:
-        query = query.join(Book.author)
-
-    if publisher_name:
-        query = query.join(Book.publisher)
-
-    # 👇 NOWE: dostępność w bibliotece
-    if library_id or available_only:
-        query = query.join(Book.copy)
+    
 
     # --- FILTRY ---
     if title:
@@ -133,8 +153,8 @@ def search_books(
     # --- GLOBAL SEARCH ---
     if q:
         query = query.outerjoin(Book.publisher)\
-                     .outerjoin(Book.author)\
-                     .outerjoin(Book.category)
+                    .outerjoin(Book.author)\
+                    .outerjoin(Book.category)
 
         query = query.filter(
             or_(
@@ -147,7 +167,7 @@ def search_books(
             )
         )
 
-    # --- 📦 DOSTĘPNOŚĆ W BIBLIOTECE ---
+    # --- DOSTĘPNOŚĆ W BIBLIOTECE ---
     if library_id:
         query = query.filter(Copy.library_id == library_id)
 
@@ -158,7 +178,7 @@ def search_books(
             subquery = subquery.filter(Copy.library_id == library_id)
 
         if available_only:
-            subquery = subquery.filter(Copy.status == "available")
+            subquery = subquery.filter(Copy.status == CopyStatus.AVAILABLE)
 
         query = query.filter(Book.book_id.in_(subquery))
 
@@ -170,7 +190,7 @@ def search_books(
 def get_book_copies_in_library(
     library_id: int,
     isbn: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     book = db.query(Book).filter(Book.isbn == isbn).first()
 
@@ -197,9 +217,12 @@ def get_book_copies_in_library(
         "copy_ids": copy_ids
     }
 
+
 @app.get("/rentals")
 def get_rentals(db: Session = Depends(get_db)):
     return db.query(Rental).all()
+
+
 
 @app.post("/rentals")
 def rent_book(
