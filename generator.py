@@ -97,7 +97,6 @@ def parse_authors(value):
     if not value:
         return []
 
-    # jeśli lista Pythonowa
     try:
         parsed = ast.literal_eval(value)
         if isinstance(parsed, list):
@@ -107,14 +106,12 @@ def parse_authors(value):
     except:
         pass
 
-    # split po przecinku (BO TAK MASZ DANE)
     parts = value.split(",")
 
     authors = []
     for p in parts:
         p = clean_author_name(p)
 
-        # filtr śmieci
         if len(p) < 2:
             continue
         if p.lower() in ["none", "unknown"]:
@@ -122,7 +119,6 @@ def parse_authors(value):
 
         authors.append(p)
 
-    # deduplikacja
     return list(dict.fromkeys(authors))
 
 
@@ -198,7 +194,7 @@ for name, district, city, postal, street, house in libraries_data:
 conn.commit()
 
 # =========================
-# COUNT ROWS (for tqdm)
+# COUNT ROWS
 # =========================
 with open(CSV_FILE, encoding='utf-8') as f:
     total_rows = sum(1 for _ in f) - 1

@@ -21,18 +21,16 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 try:
-    # Prefer projektowy SessionLocal, zgodnie z Twoim patternem
-    from database import SessionLocal as ProjectSessionLocal  # type: ignore
+    from database import SessionLocal as ProjectSessionLocal
 except Exception:
     ProjectSessionLocal = None
 
-# Optional FastAPI trigger
 try:
     from fastapi import Depends, FastAPI, HTTPException
 except Exception:
-    FastAPI = None  # type: ignore
-    Depends = None  # type: ignore
-    HTTPException = None  # type: ignore
+    FastAPI = None
+    Depends = None
+    HTTPException = None
 
 
 ISBN_CLEAN_RE = re.compile(r"[^0-9xX]")
@@ -234,7 +232,7 @@ def openlibrary_search(q: str, *, page: int, cfg: SeedConfig, result: SeedResult
         "q": q,
         "fields": ",".join(cfg.fields),
         "limit": cfg.per_query_limit,
-        "page": page,     # wg docs page starts at 1
+        "page": page,
         "lang": cfg.lang,
     }
     headers = {
@@ -251,7 +249,6 @@ def db_scalar(db: Session, sql: str, params: Optional[Dict[str, Any]] = None) ->
 
 
 def ensure_unknown_publisher(db: Session) -> int:
-    # W schemacie publisher.name nie jest UNIQUE, więc robimy SELECT-then-INSERT.
     name = "Unknown Publisher"
     existing = db_scalar(db, "SELECT publisher_id FROM publisher WHERE name=:name LIMIT 1", {"name": name})
     if existing:
@@ -612,7 +609,6 @@ if FastAPI is not None:
     SessionFactoryForAPI = None
 
     def get_db() -> Iterable[Session]:
-        # Lazy init: prefer DATABASE_URL if provided at runtime
         nonlocal_factory = globals().get("SessionFactoryForAPI")
         if nonlocal_factory is None:
             cfg = SeedConfig(db_url=os.getenv("DATABASE_URL"))
@@ -626,7 +622,7 @@ if FastAPI is not None:
             db.close()
 
     @app.post("/seed/openlibrary")
-    def seed_endpoint(payload: Dict[str, Any], db: Session = Depends(get_db)):  # type: ignore
+    def seed_endpoint(payload: Dict[str, Any], db: Session = Depends(get_db)):  
         try:
             cfg = SeedConfig(
                 db_url=os.getenv("DATABASE_URL"),
@@ -653,7 +649,7 @@ if FastAPI is not None:
         except Exception as e:
             with contextlib.suppress(Exception):
                 db.rollback()
-            raise HTTPException(status_code=500, detail=str(e))  # type: ignore
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 def main(argv: Optional[List[str]] = None) -> int:

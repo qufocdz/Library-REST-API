@@ -1,44 +1,9 @@
-from fastapi import FastAPI, Depends
-from sqlalchemy.orm import Session
-from sqlalchemy.orm import selectinload
-from sqlalchemy import or_
-
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy import text
+from database import SessionLocal
 from datetime import date, timedelta
-from fastapi import HTTPException
-from database import (
-    create_db_and_tables,
-    SessionLocal,
-    Book,
-    BookCreate,
-    BookDetailOut,
-    Author,
-    AuthorCreate,
-    AuthorDetailOut,
-    Publisher,
-    PublisherCreate,
-    PublisherDetailOut,
-    Category,
-    CategoryCreate,
-    CategoryDetailOut,
-    Copy,
-    CopyStatus,
-    Rental,
-    RentalStatus,
-    LibraryCard,
-    LibraryCardStatus,
-    Reader,
-    ReaderType,
-)
-
 
 app = FastAPI()
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    create_db_and_tables()
-
-
 
 
 def get_db():
@@ -48,350 +13,474 @@ def get_db():
     finally:
         db.close()
 
+
+# CREATE BOOK
 @app.post("/books")
-def create_book(book: BookCreate, db: Session = Depends(get_db)):
+def create_book(book: dict, db=Depends(get_db)):
 
-    book_data = book.model_dump(exclude={"author_ids", "category_ids"})
-    new_book = Book(**book_data)
+    result = db.execute(text("""
+        INSERT INTO book (title, publication_year, pages, isbn, rental_rate, publisher_id)
+        VALUES (:title, :year, :pages, :isbn, :rate, :publisher_id)
+    """), {
+        "title": book["title"],
+        "year": book["publication_year"],
+        "pages": book.get("pages"),
+        "isbn": book["isbn"],
+        "rate": book["rental_rate"],
+        "publisher_id": book["publisher_id"]
+    })
 
-    if book.author_ids:
-        authors = db.query(Author).filter(Author.author_id.in_(book.author_ids)).all()
-        new_book.author = authors
+    book_id = result.lastrowid
 
-    if book.category_ids:
-        categories = db.query(Category).filter(Category.category_id.in_(book.category_ids)).all()
-        new_book.category = categories
+    # autorzy
+    for author_id in book.get("author_ids", []):
+        db.execute(text("""
+            INSERT INTO book_author (book_id, author_id)
+            VALUES (:book_id, :author_id)
+        """), {"book_id": book_id, "author_id": author_id})
 
-    db.add(new_book)
+    # kategorie
+    for category_id in book.get("category_ids", []):
+        db.execute(text("""
+            INSERT INTO book_category (book_id, category_id)
+            VALUES (:book_id, :category_id)
+        """), {"book_id": book_id, "category_id": category_id})
+
     db.commit()
-    db.refresh(new_book)
 
-    return {
-        "message": "Book created",
-        "book_id": new_book.book_id
-    }
+    return {"message": "Book created", "book_id": book_id}
 
-@app.get("/books", response_model=list[BookDetailOut])
-def get_books(db: Session = Depends(get_db), 
-              title: str = None, 
-              author_first_name: str = None, 
-              author_last_name: str = None, 
-              publisher_name: str = None, 
-              category_name: str = None,
-              limit: int = 100
-              ):
-    
-    query = (
-        db.query(Book)
-        .options(
-            selectinload(Book.publisher),
-            selectinload(Book.author),
-            selectinload(Book.category),
-        )
-    )
+# GET BOOKS
+@app.get("/books")
+def get_books(db=Depends(get_db), limit: int = 100):
 
-    if title:
-        query = query.filter(Book.title.ilike(f"%{title}%"))
-    if author_first_name:
-        query = query.filter(Author.first_name.ilike(f"%{author_first_name}%"))
-    if author_last_name:
-        query = query.filter(Author.last_name.ilike(f"%{author_last_name}%"))
-    if publisher_name:
-        query = query.filter(Publisher.name.ilike(f"%{publisher_name}%"))
-    if category_name:
-        query = query.filter(Category.name.ilike(f"%{category_name}%"))
+    query = """
+    SELECT 
+        b.book_id,
+        b.title,
+        b.isbn,
+        p.name AS publisher,
 
-    query = query.limit(limit)
-    return query.all()
+        GROUP_CONCAT(DISTINCT CONCAT(a.first_name, ' ', a.last_name)) AS authors,
+        GROUP_CONCAT(DISTINCT c.name) AS categories
+
+    FROM book b
+    LEFT JOIN publisher p ON b.publisher_id = p.publisher_id
+
+    LEFT JOIN book_author ba ON b.book_id = ba.book_id
+    LEFT JOIN author a ON ba.author_id = a.author_id
+
+    LEFT JOIN book_category bc ON b.book_id = bc.book_id
+    LEFT JOIN category c ON bc.category_id = c.category_id
+
+    GROUP BY b.book_id
+    LIMIT :limit
+    """
+
+    rows = db.execute(text(query), {"limit": limit}).fetchall()
+
+    result = []
+
+    for row in rows:
+        result.append({
+            "book_id": row.book_id,
+            "title": row.title,
+            "isbn": row.isbn,
+            "publisher": row.publisher,
+            "authors": row.authors.split(",") if row.authors else [],
+            "categories": row.categories.split(",") if row.categories else []
+        })
+
+    return result
 
 
-
-@app.get("/books/search", response_model=list[BookDetailOut])
+# SEARCH
+@app.get("/books/search")
 def search_books(
-    db: Session = Depends(get_db),
-    title: str | None = None,
-    category_id: int | None = None,
-    category_name: str | None = None,
-    author_first_name: str | None = None,
-    author_last_name: str | None = None,
-    publisher_name: str | None = None,
-    q: str | None = None,
-    library_id: int | None = None,          
-    available_only: bool = False             
+    db=Depends(get_db),
+    q: str = None,
+    title: str = None,
+    category_id: int = None,
+    category_name: str = None,
+    author_first_name: str = None,
+    author_last_name: str = None,
+    publisher_name: str = None,
+    library_id: int = None,
+    available_only: bool = False
 ):
-    query = (
-        db.query(Book)
-        .options(
-            selectinload(Book.publisher),
-            selectinload(Book.author),
-            selectinload(Book.category),
-            selectinload(Book.copy)
-        )
-    )
 
-    
+    query = """
+    SELECT 
+        b.book_id,
+        b.title,
+        b.isbn,
+        p.name AS publisher,
 
-    # --- FILTRY ---
+        GROUP_CONCAT(DISTINCT CONCAT(a.first_name, ' ', a.last_name)) AS authors,
+        GROUP_CONCAT(DISTINCT c.name) AS categories
+
+    FROM book b
+
+    LEFT JOIN publisher p ON b.publisher_id = p.publisher_id
+
+    LEFT JOIN book_author ba ON b.book_id = ba.book_id
+    LEFT JOIN author a ON ba.author_id = a.author_id
+
+    LEFT JOIN book_category bc ON b.book_id = bc.book_id
+    LEFT JOIN category c ON bc.category_id = c.category_id
+
+    LEFT JOIN copy cp ON cp.book_id = b.book_id
+
+    WHERE 1=1
+    """
+
+    params = {}
+
+    # filtry
     if title:
-        query = query.filter(Book.title.ilike(f"%{title}%"))
+        query += " AND b.title LIKE :title"
+        params["title"] = f"%{title}%"
 
     if category_id:
-        query = query.filter(Category.category_id == category_id)
+        query += " AND c.category_id = :cid"
+        params["cid"] = category_id
 
     if category_name:
-        query = query.filter(Category.name.ilike(f"%{category_name}%"))
+        query += " AND c.name LIKE :cname"
+        params["cname"] = f"%{category_name}%"
 
     if author_first_name:
-        query = query.filter(Author.first_name.ilike(f"%{author_first_name}%"))
+        query += " AND a.first_name LIKE :afn"
+        params["afn"] = f"%{author_first_name}%"
 
     if author_last_name:
-        query = query.filter(Author.last_name.ilike(f"%{author_last_name}%"))
+        query += " AND a.last_name LIKE :aln"
+        params["aln"] = f"%{author_last_name}%"
 
     if publisher_name:
-        query = query.filter(Publisher.name.ilike(f"%{publisher_name}%"))
+        query += " AND p.name LIKE :pname"
+        params["pname"] = f"%{publisher_name}%"
 
-    # --- GLOBAL SEARCH ---
+    # wyszukanie wszędzie
     if q:
-        query = query.outerjoin(Book.publisher)\
-                    .outerjoin(Book.author)\
-                    .outerjoin(Book.category)
-
-        query = query.filter(
-            or_(
-                Book.title.ilike(f"%{q}%"),
-                Book.isbn.ilike(f"%{q}%"),
-                Publisher.name.ilike(f"%{q}%"),
-                Author.first_name.ilike(f"%{q}%"),
-                Author.last_name.ilike(f"%{q}%"),
-                Category.name.ilike(f"%{q}%"),
-            )
+        query += """
+        AND (
+            b.title LIKE :q OR
+            b.isbn LIKE :q OR
+            p.name LIKE :q OR
+            a.first_name LIKE :q OR
+            a.last_name LIKE :q OR
+            c.name LIKE :q
         )
+        """
+        params["q"] = f"%{q}%"
 
-    # --- DOSTĘPNOŚĆ W BIBLIOTECE ---
+    # dostępność w bibliotece
     if library_id:
-        query = query.filter(Copy.library_id == library_id)
+        query += " AND cp.library_id = :lib"
+        params["lib"] = library_id
 
-    if library_id or available_only:
-        subquery = db.query(Copy.book_id)
+    if available_only:
+        query += " AND cp.status = 'available'"
 
-        if library_id:
-            subquery = subquery.filter(Copy.library_id == library_id)
+    query += " GROUP BY b.book_id"
 
-        if available_only:
-            subquery = subquery.filter(Copy.status == CopyStatus.AVAILABLE)
+    rows = db.execute(text(query), params).fetchall()
 
-        query = query.filter(Book.book_id.in_(subquery))
+    result = []
 
-    return query.all()
+    for row in rows:
+        result.append({
+            "book_id": row.book_id,
+            "title": row.title,
+            "isbn": row.isbn,
+            "publisher": row.publisher,
+            "authors": row.authors.split(",") if row.authors else [],
+            "categories": row.categories.split(",") if row.categories else []
+        })
+
+    return result
 
 
-
+# COPIES IN LIBRARY
 @app.get("/libraries/{library_id}/books/{isbn}/copies")
-def get_book_copies_in_library(
-    library_id: int,
-    isbn: str,
-    db: Session = Depends(get_db),
-):
-    book = db.query(Book).filter(Book.isbn == isbn).first()
+def get_copies(library_id: int, isbn: str, db=Depends(get_db)):
+
+    book = db.execute(text("""
+        SELECT book_id FROM book WHERE isbn = :isbn
+    """), {"isbn": isbn}).fetchone()
 
     if not book:
-        raise HTTPException(status_code=404, detail="Book not found")
+        raise HTTPException(404, "Book not found")
 
-    copy_ids = (
-        db.query(Copy.copy_id)
-        .filter(
-            Copy.book_id == book.book_id,
-            Copy.library_id == library_id
-        )
-        .all()
-    )
+    copies = db.execute(text("""
+        SELECT copy_id
+        FROM copy
+        WHERE book_id = :book_id AND library_id = :library_id
+    """), {
+        "book_id": book.book_id,
+        "library_id": library_id
+    }).fetchall()
 
-    # SQLAlchemy zwraca listę tuple [(1,), (2,), ...]
-    copy_ids = [c[0] for c in copy_ids]
+    copy_ids = [c.copy_id for c in copies]
 
     return {
         "book_id": book.book_id,
-        "isbn": isbn,
-        "library_id": library_id,
-        "has_any_copy_in_library": len(copy_ids) > 0,
         "copy_ids": copy_ids
     }
 
 
-@app.get("/rentals")
-def get_rentals(db: Session = Depends(get_db)):
-    return db.query(Rental).all()
-
-
-
+# RENT BOOK
 @app.post("/rentals")
-def rent_book(
-    isbn: str,
-    library_id: int,
-    card_id: int,
-    db: Session = Depends(get_db)
-):
-    # 1. książka
-    book = db.query(Book).filter(Book.isbn == isbn).first()
+def rent_book(isbn: str, library_id: int, card_id: int, db=Depends(get_db)):
+
+    # czy jest książka
+    book = db.execute(text("SELECT * FROM book WHERE isbn=:isbn"),
+                      {"isbn": isbn}).fetchone()
     if not book:
-        raise HTTPException(status_code=404, detail="Book not found")
+        raise HTTPException(404, "Book not found")
 
-    # 2. karta
-    card = db.query(LibraryCard).filter(LibraryCard.card_id == card_id).first()
+    # czy jest aktywna karta
+    card = db.execute(text("SELECT * FROM library_card WHERE card_id=:id"),
+                      {"id": card_id}).fetchone()
     if not card:
-        raise HTTPException(status_code=404, detail="Library card not found")
+        raise HTTPException(404, "Card not found")
 
-    if card.status != LibraryCardStatus.ACTIVE:
-        raise HTTPException(status_code=400, detail="Library card is not active")
+    if card.status != "active":
+        raise HTTPException(400, "Card inactive")
 
-    # 3. reader + typ czytelnika
-    reader = db.query(Reader).filter(Reader.reader_id == card.reader_id).first()
-    reader_type = db.query(ReaderType).filter(ReaderType.type_id == reader.type_id).first()
+    # sprawdzenie typu czytelnika
+    reader = db.execute(text("SELECT * FROM reader WHERE reader_id=:id"),
+                        {"id": card.reader_id}).fetchone()
 
-    # 4. aktualnie aktywne wypożyczenia
-    active_rentals_count = (
-        db.query(Rental)
-        .join(LibraryCard)
-        .filter(
-            LibraryCard.reader_id == reader.reader_id,
-            Rental.status == RentalStatus.ACTIVE
-        )
-        .count()
-    )
+    rtype = db.execute(text("""
+        SELECT * FROM reader_type WHERE type_id=:id
+    """), {"id": reader.type_id}).fetchone()
 
-    # 5. limit książek
-    if active_rentals_count >= reader_type.max_books:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Limit reached: max {reader_type.max_books} books allowed"
-        )
+    # zebranie jego wypożyczeń
+    count = db.execute(text("""
+        SELECT COUNT(*) as cnt
+        FROM rental r
+        JOIN library_card c ON r.card_id = c.card_id
+        WHERE c.reader_id = :rid AND r.status='active'
+    """), {"rid": reader.reader_id}).fetchone().cnt
 
-    # 6. dostępna kopia
-    copy = (
-        db.query(Copy)
-        .filter(
-            Copy.book_id == book.book_id,
-            Copy.library_id == library_id,
-            Copy.status == CopyStatus.AVAILABLE
-        )
-        .first()
-    )
+    if count >= rtype.max_books:
+        raise HTTPException(400, "Limit reached")
+
+    # wybór dostępnej kopii
+    copy = db.execute(text("""
+        SELECT * FROM copy
+        WHERE book_id=:book_id
+        AND library_id=:lib
+        AND status='available'
+        LIMIT 1
+    """), {
+        "book_id": book.book_id,
+        "lib": library_id
+    }).fetchone()
 
     if not copy:
-        raise HTTPException(status_code=400, detail="No available copies")
+        raise HTTPException(400, "No copies")
 
-    # 7. terminy z typu czytelnika
+    # data oddania zgodna z typem użytkownika
     today = date.today()
-    due_date = today + timedelta(days=reader_type.borrow_days)
+    due = today + timedelta(days=rtype.borrow_days)
 
-    # 8. wypożyczenie
-    rental = Rental(
-        copy_id=copy.copy_id,
-        card_id=card.card_id,
-        rental_date=today,
-        due_date=due_date,
-        status=RentalStatus.ACTIVE,
-        rental_rate=copy.book.rental_rate
-    )
+    # dodanie wypożyczenia
+    result = db.execute(text("""
+        INSERT INTO rental (status, rental_date, due_date, copy_id, card_id)
+        VALUES ('active', :today, :due, :copy_id, :card_id)
+    """), {
+        "today": today,
+        "due": due,
+        "copy_id": copy.copy_id,
+        "card_id": card_id
+    })
 
-    # 9. zmiana statusu kopii
-    copy.status = CopyStatus.BORROWED
+    # wypożyczenie kopii
+    db.execute(text("""
+        UPDATE copy SET status='borrowed'
+        WHERE copy_id=:id
+    """), {"id": copy.copy_id})
 
-    db.add(rental)
     db.commit()
-    db.refresh(rental)
 
     return {
-        "message": "Book rented successfully",
-        "rental_id": rental.rental_id,
-        "due_date": rental.due_date,
-        "max_books_allowed": reader_type.max_books,
-        "currently_rented": active_rentals_count + 1
+        "message": "Book rented",
+        "rental_id": result.lastrowid,
+        "due_date": due
     }
 
+# GET RENTALS
+@app.get("/rentals")
+def get_rentals(db=Depends(get_db)):
+
+    result = db.execute(text("""
+        SELECT r.rental_id, r.status, r.rental_date, r.due_date,
+               r.return_date, r.copy_id, r.card_id
+        FROM rental r
+    """)).fetchall()
+
+    return [dict(row._mapping) for row in result]
+
+
+# CREATE AUTHOR
 @app.post("/authors")
-def create_author(author: AuthorCreate, db: Session = Depends(get_db)):
-    new_author = Author(**author.model_dump())
-    db.add(new_author)
+def create_author(author: dict, db=Depends(get_db)):
+
+    result = db.execute(text("""
+        INSERT INTO author (first_name, last_name)
+        VALUES (:first_name, :last_name)
+    """), author)
+
     db.commit()
-    db.refresh(new_author)
 
     return {
         "message": "Author created",
-        "author_id": new_author.author_id
+        "author_id": result.lastrowid
     }
 
-@app.get("/authors", response_model=list[AuthorDetailOut])
-def get_authors(db: Session = Depends(get_db),
-                first_name: str = None,
-                last_name: str = None):
 
-    query = db.query(Author).options(selectinload(Author.book))
+# GET AUTHORS + BOOKS
+@app.get("/authors")
+def get_authors(
+    db=Depends(get_db),
+    first_name: str = None,
+    last_name: str = None
+):
+
+    query = """
+        SELECT a.author_id, a.first_name, a.last_name,
+               b.title
+        FROM author a
+        LEFT JOIN book_author ba ON a.author_id = ba.author_id
+        LEFT JOIN book b ON ba.book_id = b.book_id
+        WHERE 1=1
+    """
+
+    params = {}
 
     if first_name:
-        query = query.filter(Author.first_name.ilike(f"%{first_name}%"))
+        query += " AND a.first_name LIKE :fn"
+        params["fn"] = f"%{first_name}%"
 
     if last_name:
-        query = query.filter(Author.last_name.ilike(f"%{last_name}%"))
+        query += " AND a.last_name LIKE :ln"
+        params["ln"] = f"%{last_name}%"
 
-    authors = query.all()
+    rows = db.execute(text(query), params).fetchall()
 
-    return [
-        {
-            "author_id": a.author_id,
-            "first_name": a.first_name,
-            "last_name": a.last_name,
-            "book_title": [b.title for b in a.book],
-        }
-        for a in authors
-    ]
-        
-    
+    # grupowanie (bo JOIN duplikuje rekordy)
+    authors = {}
 
+    for row in rows:
+        a_id = row.author_id
+
+        if a_id not in authors:
+            authors[a_id] = {
+                "author_id": a_id,
+                "first_name": row.first_name,
+                "last_name": row.last_name,
+                "book_title": []
+            }
+
+        if row.title:
+            authors[a_id]["book_title"].append(row.title)
+
+    return list(authors.values())
+
+
+# CREATE PUBLISHER
 @app.post("/publishers")
-def create_publisher(publisher: PublisherCreate, db: Session = Depends(get_db)):
-    new_publisher = Publisher(**publisher.model_dump())
-    db.add(new_publisher)
+def create_publisher(publisher: dict, db=Depends(get_db)):
+
+    result = db.execute(text("""
+        INSERT INTO publisher (name)
+        VALUES (:name)
+    """), publisher)
+
     db.commit()
-    db.refresh(new_publisher)
 
     return {
         "message": "Publisher created",
-        "publisher_id": new_publisher.publisher_id
+        "publisher_id": result.lastrowid
     }
 
-@app.get("/publishers", response_model=list[PublisherDetailOut])
-def get_publishers(db: Session = Depends(get_db)):
-    publishers = db.query(Publisher).options(selectinload(Publisher.book)).all()
-    return [
-        {
-            "publisher_id": publisher.publisher_id,
-            "name": publisher.name,
-            "book_title": [book.title for book in publisher.book],
-        }
-        for publisher in publishers
-    ]
 
+# GET PUBLISHERS + BOOKS
+@app.get("/publishers")
+def get_publishers(db=Depends(get_db)):
+
+    rows = db.execute(text("""
+        SELECT p.publisher_id, p.name, b.title
+        FROM publisher p
+        LEFT JOIN book b ON p.publisher_id = b.publisher_id
+    """)).fetchall()
+
+    publishers = {}
+
+    for row in rows:
+        p_id = row.publisher_id
+
+        if p_id not in publishers:
+            publishers[p_id] = {
+                "publisher_id": p_id,
+                "name": row.name,
+                "book_title": []
+            }
+
+        if row.title:
+            publishers[p_id]["book_title"].append(row.title)
+
+    return list(publishers.values())
+
+
+# CREATE CATEGORY
 @app.post("/categories")
-def create_category(category: CategoryCreate, db: Session = Depends(get_db)):
-    new_category = Category(**category.model_dump())
-    db.add(new_category)
-    db.commit()
-    db.refresh(new_category)
+def create_category(category: dict, db=Depends(get_db)):
 
-    return {
-        "message": "Category created",
-        "category_id": new_category.category_id
-    }
+    try:
+        result = db.execute(text("""
+            INSERT INTO category (name)
+            VALUES (:name)
+        """), category)
 
-@app.get("/categories", response_model=list[CategoryDetailOut])
-def get_categories(db: Session = Depends(get_db)):
-    categories = db.query(Category).options(selectinload(Category.book)).all()
-    return [
-        {
-            "category_id": category.category_id,
-            "name": category.name,
-            "book_title": [book.title for book in category.book],
+        db.commit()
+
+        return {
+            "message": "Category created",
+            "category_id": result.lastrowid
         }
-        for category in categories
-    ]
+
+    except Exception:
+        raise HTTPException(400, "Category already exists")
+
+
+# GET CATEGORIES + BOOKS
+@app.get("/categories")
+def get_categories(db=Depends(get_db)):
+
+    rows = db.execute(text("""
+        SELECT c.category_id, c.name, b.title
+        FROM category c
+        LEFT JOIN book_category bc ON c.category_id = bc.category_id
+        LEFT JOIN book b ON bc.book_id = b.book_id
+    """)).fetchall()
+
+    categories = {}
+
+    for row in rows:
+        c_id = row.category_id
+
+        if c_id not in categories:
+            categories[c_id] = {
+                "category_id": c_id,
+                "name": row.name,
+                "book_title": []
+            }
+
+        if row.title:
+            categories[c_id]["book_title"].append(row.title)
+
+    return list(categories.values())
