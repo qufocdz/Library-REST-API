@@ -1,55 +1,28 @@
+
+
+
 import enum
-import os
-from datetime import date
 from decimal import Decimal
-
-from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict
-from sqlalchemy import Column, Enum as SAEnum, Numeric, Text, create_engine
-from sqlalchemy.engine import URL
-from sqlalchemy.orm import sessionmaker
-from sqlmodel import Field, Relationship, SQLModel
-
-load_dotenv()
+from sqlmodel import SQLModel, Field, Relationship, Column
+from sqlalchemy import Enum as SAEnum ,Numeric, Text
+from datetime import date
 
 
 
-
-
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = (os.getenv("DB_PORT"))
-DB_NAME = os.getenv("DB_NAME")
-
-SQLALCHEMY_DATABASE_URL = URL.create(
-    drivername="mysql+pymysql",
-    username=DB_USER or None,
-    password=DB_PASSWORD or None,
-    host=DB_HOST or None,
-    port=DB_PORT,
-    database=DB_NAME or None,
-)
-
-engine = create_engine(SQLALCHEMY_DATABASE_URL, echo=True)
-
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-
-class CopyStatus(str, enum.Enum):
+class CopyStatus(enum.Enum):
     AVAILABLE = "available"
     BORROWED = "borrowed"
     LOST = "lost"
     DAMAGED = "damaged"
 
 
-class LibraryCardStatus(str, enum.Enum):
+class LibraryCardStatus(enum.Enum):
     ACTIVE = "active"
     SUSPENDED = "suspended"
     BLOCKED = "blocked"
 
 
-class RentalStatus(str, enum.Enum):
+class RentalStatus(enum.Enum):
     ACTIVE = "active"
     OVERDUE = "overdue"
     RETURNED = "returned"
@@ -58,7 +31,7 @@ class RentalStatus(str, enum.Enum):
     DAMAGED = "damaged"
 
 
-class InternalRentalStatus(str, enum.Enum):
+class InternalRentalStatus(enum.Enum):
     REQUESTED = "requested"
     APPROVED = "approved"
     REJECTED = "rejected"
@@ -134,96 +107,6 @@ class Book(SQLModel, table=True):
     copy: list["Copy"] = Relationship(back_populates="book")
 
 
-class BookCreate(BaseModel):
-    title: str
-    publication_year: int
-    pages: int | None = None
-    isbn: str
-    rental_rate: float
-    publisher_id: int
-    author_ids: list[int] | None = None
-    category_ids: list[int] | None = None
-
-
-class AuthorCreate(BaseModel):
-    first_name: str
-    last_name: str
-
-
-class PublisherCreate(BaseModel):
-    name: str
-
-
-class CategoryCreate(BaseModel):
-    name: str
-
-
-class PublisherOut(SQLModel):
-    publisher_id: int
-    name: str
-
-    model_config = ConfigDict(from_attributes=True)
-
-class CategoryOut(SQLModel):
-    category_id: int
-    name: str
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class AuthorOut(SQLModel):
-    author_id: int
-    first_name: str
-    last_name: str
-    
-    model_config = ConfigDict(from_attributes=True)
-
-
-class BookListOut(SQLModel):
-    book_id: int
-    title: str
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class AuthorDetailOut(BaseModel):
-    author_id: int
-    first_name: str
-    last_name: str
-    book_title: list[str]
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class PublisherDetailOut(BaseModel):
-    publisher_id: int
-    name: str
-    book_title: list[str]
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class CategoryDetailOut(BaseModel):
-    category_id: int
-    name: str
-    book_title: list[str]
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class BookDetailOut(BaseModel):
-    book_id: int
-    title: str
-    publication_year: int | None
-    pages: int | None
-    isbn: str | None
-    rental_rate: float | None
-    publisher: PublisherOut | None
-    author: list[AuthorOut]
-    category: list[CategoryOut]
-
-    model_config = ConfigDict(from_attributes=True)
-
 class Category(SQLModel, table=True):
     __tablename__ = "category"
 
@@ -279,7 +162,7 @@ class ReaderType(SQLModel, table=True):
     name: str = Field(max_length=45)
     max_books: int
     borrow_days: int
-    fine_per_day: Decimal = Field(sa_column=Column(Numeric(5, 2), nullable=False))
+    fine_per_day: Decimal= Field(sa_column=Column(Numeric(5, 2), nullable=False))
 
     reader: list["Reader"] = Relationship(back_populates="reader_type")
 
@@ -400,7 +283,5 @@ class Payment(SQLModel, table=True):
     rental: Rental | None = Relationship(back_populates="payment")
 
 
-def create_db_and_tables() -> None:
-    SQLModel.metadata.create_all(engine)
 
 

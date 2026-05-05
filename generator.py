@@ -21,6 +21,7 @@ DB_NAME = os.getenv("DB_NAME")
 # =========================
 DB_CONFIG = {
     'host': DB_HOST,
+    'port': int(DB_PORT) if DB_PORT else 3306,
     'user': DB_USER,
     'password': DB_PASSWORD,
     'database': DB_NAME
@@ -40,7 +41,7 @@ cursor = conn.cursor()
 used_isbns = set()
 
 
-def generate_isbn():
+def generate_isbn():745
     while True:
         isbn = "96" + "".join([str(random.randint(0, 9)) for _ in range(11)])
         if isbn not in used_isbns:

@@ -1,18 +1,19 @@
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy import text
-from database import SessionLocal
+
 from datetime import date, timedelta
+from database import create_db_and_tables, async_session
 
 app = FastAPI()
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+async def get_db():
+    async with async_session() as session:
+        yield session
 
+@app.on_event("startup")
+async def on_startup():
+    await create_db_and_tables()
 
 # CREATE BOOK
 @app.post("/books")
@@ -52,7 +53,7 @@ def create_book(book: dict, db=Depends(get_db)):
 
 # GET BOOKS
 @app.get("/books")
-def get_books(db=Depends(get_db), limit: int = 100):
+async def get_books(db=Depends(get_db), limit: int = 100):
 
     query = """
     SELECT 
@@ -77,7 +78,8 @@ def get_books(db=Depends(get_db), limit: int = 100):
     LIMIT :limit
     """
 
-    rows = db.execute(text(query), {"limit": limit}).fetchall()
+    rows = await db.execute(text(query), {"limit": limit})
+    rows = rows.fetchall()
 
     result = []
 
@@ -96,7 +98,7 @@ def get_books(db=Depends(get_db), limit: int = 100):
 
 # SEARCH
 @app.get("/books/search")
-def search_books(
+async def search_books(
     db=Depends(get_db),
     q: str = None,
     title: str = None,
@@ -185,7 +187,8 @@ def search_books(
 
     query += " GROUP BY b.book_id"
 
-    rows = db.execute(text(query), params).fetchall()
+    rows = await db.execute(text(query), params)
+
 
     result = []
 
@@ -204,23 +207,25 @@ def search_books(
 
 # COPIES IN LIBRARY
 @app.get("/libraries/{library_id}/books/{isbn}/copies")
-def get_copies(library_id: int, isbn: str, db=Depends(get_db)):
+async def get_copies(library_id: int, isbn: str, db=Depends(get_db)):
 
-    book = db.execute(text("""
+    book = await db.execute(text("""
         SELECT book_id FROM book WHERE isbn = :isbn
-    """), {"isbn": isbn}).fetchone()
+    """), {"isbn": isbn})
+    book = book.fetchone()
 
     if not book:
         raise HTTPException(404, "Book not found")
 
-    copies = db.execute(text("""
+    copies = await db.execute(text("""
         SELECT copy_id
         FROM copy
         WHERE book_id = :book_id AND library_id = :library_id
     """), {
         "book_id": book.book_id,
         "library_id": library_id
-    }).fetchall()
+    })
+    copies = copies.fetchall()
 
     copy_ids = [c.copy_id for c in copies]
 
@@ -232,17 +237,19 @@ def get_copies(library_id: int, isbn: str, db=Depends(get_db)):
 
 # RENT BOOK
 @app.post("/rentals")
-def rent_book(isbn: str, library_id: int, card_id: int, db=Depends(get_db)):
+async def rent_book(isbn: str, library_id: int, card_id: int, db=Depends(get_db)):
 
     # czy jest książka
-    book = db.execute(text("SELECT * FROM book WHERE isbn=:isbn"),
-                      {"isbn": isbn}).fetchone()
+    book = await db.execute(text("SELECT * FROM book WHERE isbn=:isbn"),
+                            {"isbn": isbn})
+    book = book.fetchone()
     if not book:
         raise HTTPException(404, "Book not found")
 
     # czy jest aktywna karta
-    card = db.execute(text("SELECT * FROM library_card WHERE card_id=:id"),
-                      {"id": card_id}).fetchone()
+    card = await db.execute(text("SELECT * FROM library_card WHERE card_id=:id"),
+                            {"id": card_id})
+    card = card.fetchone()
     if not card:
         raise HTTPException(404, "Card not found")
 
@@ -250,15 +257,17 @@ def rent_book(isbn: str, library_id: int, card_id: int, db=Depends(get_db)):
         raise HTTPException(400, "Card inactive")
 
     # sprawdzenie typu czytelnika
-    reader = db.execute(text("SELECT * FROM reader WHERE reader_id=:id"),
-                        {"id": card.reader_id}).fetchone()
+    reader = await db.execute(text("SELECT * FROM reader WHERE reader_id=:id"),
+                              {"id": card.reader_id})
+    reader = reader.fetchone()
 
-    rtype = db.execute(text("""
+    rtype = await db.execute(text("""
         SELECT * FROM reader_type WHERE type_id=:id
-    """), {"id": reader.type_id}).fetchone()
+    """), {"id": reader.type_id})
+    rtype = rtype.fetchone()
 
     # zebranie jego wypożyczeń
-    count = db.execute(text("""
+    count = await db.execute(text("""
         SELECT COUNT(*) as cnt
         FROM rental r
         JOIN library_card c ON r.card_id = c.card_id
@@ -269,7 +278,7 @@ def rent_book(isbn: str, library_id: int, card_id: int, db=Depends(get_db)):
         raise HTTPException(400, "Limit reached")
 
     # wybór dostępnej kopii
-    copy = db.execute(text("""
+    copy = await db.execute(text("""
         SELECT * FROM copy
         WHERE book_id=:book_id
         AND library_id=:lib
@@ -278,7 +287,8 @@ def rent_book(isbn: str, library_id: int, card_id: int, db=Depends(get_db)):
     """), {
         "book_id": book.book_id,
         "lib": library_id
-    }).fetchone()
+    })
+    copy = copy.fetchone()
 
     if not copy:
         raise HTTPException(400, "No copies")
@@ -288,7 +298,7 @@ def rent_book(isbn: str, library_id: int, card_id: int, db=Depends(get_db)):
     due = today + timedelta(days=rtype.borrow_days)
 
     # dodanie wypożyczenia
-    result = db.execute(text("""
+    result = await db.execute(text("""
         INSERT INTO rental (status, rental_date, due_date, copy_id, card_id)
         VALUES ('active', :today, :due, :copy_id, :card_id)
     """), {
@@ -299,12 +309,12 @@ def rent_book(isbn: str, library_id: int, card_id: int, db=Depends(get_db)):
     })
 
     # wypożyczenie kopii
-    db.execute(text("""
+    await db.execute(text("""
         UPDATE copy SET status='borrowed'
         WHERE copy_id=:id
     """), {"id": copy.copy_id})
 
-    db.commit()
+    await db.commit()
 
     return {
         "message": "Book rented",
@@ -314,27 +324,28 @@ def rent_book(isbn: str, library_id: int, card_id: int, db=Depends(get_db)):
 
 # GET RENTALS
 @app.get("/rentals")
-def get_rentals(db=Depends(get_db)):
+async def get_rentals(db=Depends(get_db)):
 
-    result = db.execute(text("""
+    result = await db.execute(text("""
         SELECT r.rental_id, r.status, r.rental_date, r.due_date,
                r.return_date, r.copy_id, r.card_id
         FROM rental r
-    """)).fetchall()
+    """))
+    result = result.fetchall()
 
     return [dict(row._mapping) for row in result]
 
 
 # CREATE AUTHOR
 @app.post("/authors")
-def create_author(author: dict, db=Depends(get_db)):
+async def create_author(author: dict, db=Depends(get_db)):
 
-    result = db.execute(text("""
+    result = await db.execute(text("""
         INSERT INTO author (first_name, last_name)
         VALUES (:first_name, :last_name)
     """), author)
 
-    db.commit()
+    await db.commit()
 
     return {
         "message": "Author created",
@@ -344,7 +355,7 @@ def create_author(author: dict, db=Depends(get_db)):
 
 # GET AUTHORS + BOOKS
 @app.get("/authors")
-def get_authors(
+async def get_authors(
     db=Depends(get_db),
     first_name: str = None,
     last_name: str = None
@@ -369,7 +380,8 @@ def get_authors(
         query += " AND a.last_name LIKE :ln"
         params["ln"] = f"%{last_name}%"
 
-    rows = db.execute(text(query), params).fetchall()
+    rows = await db.execute(text(query), params)
+    rows = rows.fetchall()
 
     # grupowanie (bo JOIN duplikuje rekordy)
     authors = {}
@@ -393,14 +405,14 @@ def get_authors(
 
 # CREATE PUBLISHER
 @app.post("/publishers")
-def create_publisher(publisher: dict, db=Depends(get_db)):
+async def create_publisher(publisher: dict, db=Depends(get_db)):
 
-    result = db.execute(text("""
+    result = await db.execute(text("""
         INSERT INTO publisher (name)
         VALUES (:name)
     """), publisher)
 
-    db.commit()
+    await db.commit()
 
     return {
         "message": "Publisher created",
@@ -410,13 +422,14 @@ def create_publisher(publisher: dict, db=Depends(get_db)):
 
 # GET PUBLISHERS + BOOKS
 @app.get("/publishers")
-def get_publishers(db=Depends(get_db)):
+async def get_publishers(db=Depends(get_db)):
 
-    rows = db.execute(text("""
+    rows = await db.execute(text("""
         SELECT p.publisher_id, p.name, b.title
         FROM publisher p
         LEFT JOIN book b ON p.publisher_id = b.publisher_id
-    """)).fetchall()
+    """))
+    rows= rows.fetchall()
 
     publishers = {}
 
@@ -438,15 +451,15 @@ def get_publishers(db=Depends(get_db)):
 
 # CREATE CATEGORY
 @app.post("/categories")
-def create_category(category: dict, db=Depends(get_db)):
+async def create_category(category: dict, db=Depends(get_db)):
 
     try:
-        result = db.execute(text("""
+        result = await db.execute(text("""
             INSERT INTO category (name)
             VALUES (:name)
         """), category)
 
-        db.commit()
+        await db.commit()
 
         return {
             "message": "Category created",
@@ -459,14 +472,15 @@ def create_category(category: dict, db=Depends(get_db)):
 
 # GET CATEGORIES + BOOKS
 @app.get("/categories")
-def get_categories(db=Depends(get_db)):
+async def get_categories(db=Depends(get_db)):
 
-    rows = db.execute(text("""
+    rows = await db.execute(text("""
         SELECT c.category_id, c.name, b.title
         FROM category c
         LEFT JOIN book_category bc ON c.category_id = bc.category_id
         LEFT JOIN book b ON bc.book_id = b.book_id
-    """)).fetchall()
+    """))
+    rows = rows.fetchall()
 
     categories = {}
 
