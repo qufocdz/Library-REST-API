@@ -106,7 +106,8 @@ def search_books(
     author_last_name: str = None,
     publisher_name: str = None,
     library_id: int = None,
-    available_only: bool = False
+    available_only: bool = False,
+    limit: int = 100
 ):
 
     query = """
@@ -134,7 +135,7 @@ def search_books(
     WHERE 1=1
     """
 
-    params = {}
+    params = {"limit": limit}
 
     # filtry
     if title:
@@ -161,7 +162,6 @@ def search_books(
         query += " AND p.name LIKE :pname"
         params["pname"] = f"%{publisher_name}%"
 
-    # wyszukanie wszędzie
     if q:
         query += """
         AND (
@@ -175,7 +175,6 @@ def search_books(
         """
         params["q"] = f"%{q}%"
 
-    # dostępność w bibliotece
     if library_id:
         query += " AND cp.library_id = :lib"
         params["lib"] = library_id
@@ -184,6 +183,7 @@ def search_books(
         query += " AND cp.status = 'available'"
 
     query += " GROUP BY b.book_id"
+    query += " LIMIT :limit"
 
     rows = db.execute(text(query), params).fetchall()
 
