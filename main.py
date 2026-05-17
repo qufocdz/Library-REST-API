@@ -1,22 +1,29 @@
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy import text
-from database import SessionLocal
+from database import MasterSessionLocal, SlaveSessionLocal
 from datetime import date, timedelta
 
 app = FastAPI()
 
 
-def get_db():
-    db = SessionLocal()
+def get_master_db():
+    db = MasterSessionLocal()
     try:
         yield db
     finally:
         db.close()
 
 
+def get_slave_db():
+    db = SlaveSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 # CREATE BOOK
 @app.post("/books")
-def create_book(book: dict, db=Depends(get_db)):
+def create_book(book: dict, db=Depends(get_master_db)):
 
     result = db.execute(text("""
         INSERT INTO book (title, publication_year, pages, isbn, rental_rate, publisher_id)
@@ -52,7 +59,7 @@ def create_book(book: dict, db=Depends(get_db)):
 
 # GET BOOKS
 @app.get("/books")
-def get_books(db=Depends(get_db), limit: int = 100):
+def get_books(db=Depends(get_slave_db), limit: int = 100):
 
     query = """
     SELECT 
@@ -97,7 +104,7 @@ def get_books(db=Depends(get_db), limit: int = 100):
 # SEARCH BOOKS (FULLTEXT BOOLEAN MODE)
 @app.get("/books/search")
 def search_books(
-    db=Depends(get_db),
+    db=Depends(get_slave_db),
     q: str = None,
     category_id: int = None,
     category_name: str = None,
@@ -241,7 +248,7 @@ def search_books(
 
 # COPIES IN LIBRARY
 @app.get("/libraries/{library_id}/books/{isbn}/copies")
-def get_copies(library_id: int, isbn: str, db=Depends(get_db)):
+def get_copies(library_id: int, isbn: str, db=Depends(get_master_db)):
 
     book = db.execute(text("""
         SELECT book_id FROM book WHERE isbn = :isbn
@@ -269,7 +276,7 @@ def get_copies(library_id: int, isbn: str, db=Depends(get_db)):
 
 # RENT BOOK
 @app.post("/rentals")
-def rent_book(isbn: str, library_id: int, card_id: int, db=Depends(get_db)):
+def rent_book(isbn: str, library_id: int, card_id: int, db=Depends(get_master_db)):
 
     # czy jest książka
     book = db.execute(text("SELECT * FROM book WHERE isbn=:isbn"),
@@ -351,7 +358,7 @@ def rent_book(isbn: str, library_id: int, card_id: int, db=Depends(get_db)):
 
 # GET RENTALS
 @app.get("/rentals")
-def get_rentals(db=Depends(get_db)):
+def get_rentals(db=Depends(get_slave_db)):
 
     result = db.execute(text("""
         SELECT r.rental_id, r.status, r.rental_date, r.due_date,
@@ -364,7 +371,7 @@ def get_rentals(db=Depends(get_db)):
 
 # CREATE AUTHOR
 @app.post("/authors")
-def create_author(author: dict, db=Depends(get_db)):
+def create_author(author: dict, db=Depends(get_master_db)):
 
     result = db.execute(text("""
         INSERT INTO author (first_name, last_name)
@@ -382,7 +389,7 @@ def create_author(author: dict, db=Depends(get_db)):
 # GET AUTHORS + BOOKS
 @app.get("/authors")
 def get_authors(
-    db=Depends(get_db),
+    db=Depends(get_slave_db),
     first_name: str = None,
     last_name: str = None
 ):
@@ -430,7 +437,7 @@ def get_authors(
 
 # CREATE PUBLISHER
 @app.post("/publishers")
-def create_publisher(publisher: dict, db=Depends(get_db)):
+def create_publisher(publisher: dict, db=Depends(get_master_db)):
 
     result = db.execute(text("""
         INSERT INTO publisher (name)
@@ -447,7 +454,7 @@ def create_publisher(publisher: dict, db=Depends(get_db)):
 
 # GET PUBLISHERS + BOOKS
 @app.get("/publishers")
-def get_publishers(db=Depends(get_db)):
+def get_publishers(db=Depends(get_slave_db)):
 
     rows = db.execute(text("""
         SELECT p.publisher_id, p.name, b.title
@@ -475,7 +482,7 @@ def get_publishers(db=Depends(get_db)):
 
 # CREATE CATEGORY
 @app.post("/categories")
-def create_category(category: dict, db=Depends(get_db)):
+def create_category(category: dict, db=Depends(get_master_db)):
 
     try:
         result = db.execute(text("""
@@ -496,7 +503,7 @@ def create_category(category: dict, db=Depends(get_db)):
 
 # GET CATEGORIES + BOOKS
 @app.get("/categories")
-def get_categories(db=Depends(get_db)):
+def get_categories(db=Depends(get_slave_db)):
 
     rows = db.execute(text("""
         SELECT c.category_id, c.name, b.title

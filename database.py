@@ -22,18 +22,28 @@ DB_HOST = os.getenv("DB_HOST")
 DB_PORT = (os.getenv("DB_PORT"))
 DB_NAME = os.getenv("DB_NAME")
 
-SQLALCHEMY_DATABASE_URL = URL.create(
+MASTER_DB_URL = URL.create(
     drivername="mysql+pymysql",
-    username=DB_USER or None,
-    password=DB_PASSWORD or None,
-    host=DB_HOST or None,
-    port=DB_PORT,
-    database=DB_NAME or None,
+    username=DB_USER,
+    password=DB_PASSWORD,
+    host=DB_HOST,
+    port=3306,
+    database=DB_NAME,
 )
 
-engine = create_engine(SQLALCHEMY_DATABASE_URL, echo=True)
+SLAVE_DB_URL = URL.create(
+    drivername="mysql+pymysql",
+    username=DB_USER,
+    host=DB_HOST,
+    port=3307,
+    database=DB_NAME,
+)
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+master_engine = create_engine(MASTER_DB_URL, echo=True)
+slave_engine = create_engine(SLAVE_DB_URL, echo=True)
+
+MasterSessionLocal = sessionmaker(bind=master_engine)
+SlaveSessionLocal = sessionmaker(bind=slave_engine)
 
 
 class CopyStatus(str, enum.Enum):
@@ -401,6 +411,7 @@ class Payment(SQLModel, table=True):
 
 
 def create_db_and_tables() -> None:
-    SQLModel.metadata.create_all(engine)
+    SQLModel.metadata.create_all(master_engine)
+    SQLModel.metadata.create_all(slave_engine)
 
 
