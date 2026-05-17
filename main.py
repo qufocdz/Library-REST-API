@@ -94,12 +94,11 @@ def get_books(db=Depends(get_db), limit: int = 100):
     return result
 
 
-# SEARCH
+# SEARCH BOOKS (FULLTEXT BOOLEAN MODE)
 @app.get("/books/search")
 def search_books(
     db=Depends(get_db),
     q: str = None,
-    title: str = None,
     category_id: int = None,
     category_name: str = None,
     author_first_name: str = None,
@@ -117,89 +116,127 @@ def search_books(
         b.isbn,
         p.name AS publisher,
 
-        GROUP_CONCAT(DISTINCT CONCAT(a.first_name, ' ', a.last_name)) AS authors,
-        GROUP_CONCAT(DISTINCT c.name) AS categories
+        (
+            SELECT GROUP_CONCAT(DISTINCT CONCAT(a.first_name, ' ', a.last_name))
+            FROM book_author ba
+            JOIN author a ON a.author_id = ba.author_id
+            WHERE ba.book_id = b.book_id
+        ) AS authors,
+
+        (
+            SELECT GROUP_CONCAT(DISTINCT c.name)
+            FROM book_category bc
+            JOIN category c ON c.category_id = bc.category_id
+            WHERE bc.book_id = b.book_id
+        ) AS categories
 
     FROM book b
 
-    LEFT JOIN publisher p ON b.publisher_id = p.publisher_id
-
-    LEFT JOIN book_author ba ON b.book_id = ba.book_id
-    LEFT JOIN author a ON ba.author_id = a.author_id
-
-    LEFT JOIN book_category bc ON b.book_id = bc.book_id
-    LEFT JOIN category c ON bc.category_id = c.category_id
-
-    LEFT JOIN copy cp ON cp.book_id = b.book_id
+    JOIN publisher p
+        ON p.publisher_id = b.publisher_id
 
     WHERE 1=1
     """
 
     params = {"limit": limit}
 
-    # filtry
-    if title:
-        query += " AND b.title LIKE :title"
-        params["title"] = f"%{title}%"
-
-    if category_id:
-        query += " AND c.category_id = :cid"
-        params["cid"] = category_id
-
-    if category_name:
-        query += " AND c.name LIKE :cname"
-        params["cname"] = f"%{category_name}%"
-
-    if author_first_name:
-        query += " AND a.first_name LIKE :afn"
-        params["afn"] = f"%{author_first_name}%"
-
-    if author_last_name:
-        query += " AND a.last_name LIKE :aln"
-        params["aln"] = f"%{author_last_name}%"
-
-    if publisher_name:
-        query += " AND p.name LIKE :pname"
-        params["pname"] = f"%{publisher_name}%"
-
+    # FULLTEXT SEARCH
     if q:
         query += """
-        AND (
-            b.title LIKE :q OR
-            b.isbn LIKE :q OR
-            p.name LIKE :q OR
-            a.first_name LIKE :q OR
-            a.last_name LIKE :q OR
-            c.name LIKE :q
+        AND MATCH(b.title, b.isbn)
+            AGAINST(:q IN BOOLEAN MODE)
+        """
+        params["q"] = to_boolean_query(q)
+
+    # category filter
+    if category_name:
+        query += """
+        AND EXISTS (
+            SELECT 1
+            FROM book_category bc
+            JOIN category c ON c.category_id = bc.category_id
+            WHERE bc.book_id = b.book_id
+              AND MATCH(c.name) AGAINST(:cname IN BOOLEAN MODE)
         )
         """
-        params["q"] = f"%{q}%"
+        params["cname"] = category_name
 
-    if library_id:
-        query += " AND cp.library_id = :lib"
-        params["lib"] = library_id
+    if category_id:
+        query += """
+        AND EXISTS (
+            SELECT 1
+            FROM book_category bc
+            WHERE bc.book_id = b.book_id
+              AND bc.category_id = :cid
+        )
+        """
+        params["cid"] = category_id
 
-    if available_only:
-        query += " AND cp.status = 'available'"
+    # author filters
+    if author_first_name or author_last_name:
+        query += """
+        AND EXISTS (
+            SELECT 1
+            FROM book_author ba
+            JOIN author a ON a.author_id = ba.author_id
+            WHERE ba.book_id = b.book_id
+        """
 
-    query += " GROUP BY b.book_id"
+        author_query_parts = []
+
+        if author_first_name:
+            author_query_parts.append(author_first_name)
+
+        if author_last_name:
+            author_query_parts.append(author_last_name)
+
+        if author_query_parts:
+            params["author_q"] = to_boolean_query(" ".join(author_query_parts))
+            query += " AND MATCH(a.first_name, a.last_name) AGAINST(:author_q IN BOOLEAN MODE)"
+
+        query += ")"
+
+    # publisher
+    if publisher_name:
+        query += """
+        AND MATCH(p.name) AGAINST(:pname IN BOOLEAN MODE)
+        """
+        params["pname"] = publisher_name
+
+    # availability
+    if library_id or available_only:
+        query += """
+        AND EXISTS (
+            SELECT 1
+            FROM copy cp
+            WHERE cp.book_id = b.book_id
+        """
+
+        if library_id:
+            query += " AND cp.library_id = :lib"
+            params["lib"] = library_id
+
+        if available_only:
+            query += " AND cp.status = 'available'"
+
+        query += ")"
+
     query += " LIMIT :limit"
+    params["limit"] = limit
 
     rows = db.execute(text(query), params).fetchall()
 
-    result = []
-
-    for row in rows:
-        result.append({
+    return [
+        {
             "book_id": row.book_id,
             "title": row.title,
             "isbn": row.isbn,
             "publisher": row.publisher,
             "authors": row.authors.split(",") if row.authors else [],
             "categories": row.categories.split(",") if row.categories else []
-        })
-
-    return result
+        }
+        for row in rows
+    ]
 
 
 # COPIES IN LIBRARY
@@ -484,3 +521,11 @@ def get_categories(db=Depends(get_db)):
             categories[c_id]["book_title"].append(row.title)
 
     return list(categories.values())
+
+def to_boolean_query(q: str) -> str:
+    if not q:
+        return q
+
+    words = q.strip().split()
+
+    return " ".join(f"+{w}" for w in words)
