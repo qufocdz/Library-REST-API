@@ -41,7 +41,7 @@ cursor = conn.cursor()
 used_isbns = set()
 
 
-def generate_isbn():745
+def generate_isbn():
     while True:
         isbn = "96" + "".join([str(random.randint(0, 9)) for _ in range(11)])
         if isbn not in used_isbns:
